@@ -1,7 +1,6 @@
 /**
- * ProcesarVentaController — Controlador del Servicio de Tarea "Procesar Venta".
- * Único punto de orquestación del sistema SOA.
- * Extrae el token del header Authorization y delega al servicio orquestador.
+ * ProcesarVentaController — Controlador del Compositor "Procesar Venta".
+ * Patrón Chain — extrae el token y delega al servicio orquestador.
  */
 
 import { ProcesarVentaService, ProcesarVentaDto } from '../services/procesar-venta.service';
@@ -12,7 +11,6 @@ export class ProcesarVentaController {
 
   /** POST /api/v1/procesar-venta — Ejecuta el flujo completo de venta */
   async procesar(request: Request): Promise<Response> {
-    // Extraer token del header Authorization (formato: "Bearer <token>")
     const authHeader = request.headers.get('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return jsonResponse(
@@ -22,8 +20,13 @@ export class ProcesarVentaController {
     }
     const token = authHeader.replace('Bearer ', '');
 
-    // Parsear y validar body
-    const dto = await parseBody<ProcesarVentaDto>(request);
+    let dto: ProcesarVentaDto;
+    try {
+      dto = await parseBody<ProcesarVentaDto>(request);
+    } catch {
+      return jsonResponse(errorResponse('El body debe ser JSON válido', 'JSON_INVALIDO'), 400);
+    }
+
     if (!dto.clienteId || !dto.vehiculoId || !dto.precioOfertado) {
       return jsonResponse(
         errorResponse('Faltan campos requeridos: clienteId, vehiculoId, precioOfertado', 'CAMPOS_REQUERIDOS'),
@@ -31,11 +34,9 @@ export class ProcesarVentaController {
       );
     }
 
-    // Ejecutar orquestación
     const resultado = await this.service.procesar(dto, token);
 
     if (!resultado.exito) {
-      // Determinar código HTTP según el tipo de error
       const status = resultado.errorCode === 'TOKEN_INVALIDO' ? 401 : 400;
       return jsonResponse(errorResponse(resultado.error, resultado.errorCode), status);
     }

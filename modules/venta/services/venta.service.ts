@@ -43,6 +43,13 @@ export class VentaService {
     return venta ? this.toResponseDto(venta) : undefined;
   }
 
+  /** Consulta el historial de ventas de un vehículo específico */
+  consultarHistorialVentas(vehiculoId: string): VentaResponseDto[] {
+    return this.repository.findAll()
+      .filter((v) => v.vehiculoId === vehiculoId)
+      .map(this.toResponseDto);
+  }
+
   delete(id: string): boolean {
     return this.repository.delete(id);
   }

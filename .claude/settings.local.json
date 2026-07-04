@@ -9,7 +9,9 @@
       "Bash(curl -s -X DELETE http://localhost:3000/api/v1/vehiculos/VH-999)",
       "Bash(netstat -ano)",
       "Bash(taskkill:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

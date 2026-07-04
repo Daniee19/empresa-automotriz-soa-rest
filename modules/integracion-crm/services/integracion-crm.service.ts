@@ -26,6 +26,18 @@ export class IntegracionCRMService {
   private static historial: SincronizacionResultadoDto[] = [];
   private static nextId = 1;
 
+  /** Obtiene interacciones simuladas de un cliente desde el CRM */
+  obtenerInteracciones(clienteId: string): { clienteId: string; interacciones: number; ultimaInteraccion: string; interes: string } {
+    // ponytail: simulado — devuelve datos ficticios basados en el clienteId
+    const interacciones = Math.floor(Math.random() * 10) + 1;
+    return {
+      clienteId,
+      interacciones,
+      ultimaInteraccion: new Date().toISOString(),
+      interes: interacciones > 5 ? 'alto' : interacciones > 2 ? 'medio' : 'bajo',
+    };
+  }
+
   /**
    * Simula la sincronización con un CRM externo.
    * En producción, aquí se realizaría una llamada HTTP al CRM real.

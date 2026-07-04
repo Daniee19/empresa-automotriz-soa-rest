@@ -1,26 +1,24 @@
 /**
- * ServicioProcesarVenta — Servicio de Tarea SOA (Orquestador).
+ * ServicioProcesarVenta — Servicio de Tarea SOA (Compositor / Orquestador).
  *
- * Este es el ÚNICO servicio que coordina el flujo completo de venta.
- * Ningún otro servicio llama a otro directamente; toda la comunicación
- * entre servicios pasa por este orquestador.
+ * Composición — Venta Completa de Vehículo
+ * Patrón: Chain (cadena secuencial)
+ * Tipo de invocación: Secuencial — cada servicio depende del resultado del anterior
+ * Trigger: El cliente confirma la compra de un vehículo desde la plataforma web
  *
  * Flujo de orquestación:
- *   1. Validar token de autenticación
- *   2. Obtener datos del cliente
- *   3. Obtener datos del vehículo
- *   4. Verificar inspección aprobada
- *   5. Verificar que el vehículo no esté en subasta activa
- *   6. Registrar la venta
- *   7. Actualizar estado del vehículo a "vendido"
- *   8. Enviar notificación de confirmación
- *   9. Sincronizar con CRM
+ *   1. SVC-08 ServicioAutenticacion  → validarToken
+ *   2. SVC-02 ServicioCliente        → consultarCliente (por dniCliente)
+ *   3. SVC-01 ServicioVehiculo       → consultarVehiculo
+ *   4. SVC-03 ServicioInspeccion     → obtenerEstadoTecnico
+ *   5. SVC-05 ServicioSubasta        → validarDisponibilidad
+ *   6. SVC-04 ServicioVenta          → registrarVenta
+ *   7. SVC-07 ServicioNotificacion   → enviarNotificacion
  *
- * Patrón Saga con Compensación:
- *   Los pasos 1-5 son de solo lectura (no mutan estado).
- *   Los pasos 6-9 mutan estado — si alguno falla, se ejecutan
- *   transacciones compensatorias en orden inverso para deshacer
- *   los cambios ya realizados y mantener la consistencia.
+ * Comportamiento ante error:
+ *   - Paso 3 devuelve VEHICULO_NO_DISPONIBLE → se detiene e informa al cliente.
+ *   - Paso 4 devuelve INSPECCION_PENDIENTE o INSPECCION_RECHAZADA → no se
+ *     ejecutan pasos posteriores hasta regularizar la inspección técnica.
  */
 
 import { AutenticacionService } from '@/modules/autenticacion/services/autenticacion.service';
@@ -30,7 +28,6 @@ import { InspeccionService } from '@/modules/inspeccion/services/inspeccion.serv
 import { SubastaService } from '@/modules/subasta/services/subasta.service';
 import { VentaService } from './venta.service';
 import { NotificacionService } from '@/modules/notificacion/services/notificacion.service';
-import { IntegracionCRMService } from '@/modules/integracion-crm/services/integracion-crm.service';
 
 /** Datos de entrada para procesar una venta */
 export interface ProcesarVentaDto {
@@ -53,12 +50,10 @@ export interface ProcesarVentaResultado {
   vehiculo: { id: string; marca: string; modelo: string; estado: string };
   inspeccion: { aprobado: boolean; id?: string };
   notificacion: { id: string; estado: string };
-  crm: { id: string; crmReferencia: string };
   pasos: string[]; // Registro de cada paso ejecutado exitosamente
 }
 
 export class ProcesarVentaService {
-  // Instancias de cada servicio que el orquestador coordinará
   private autenticacionService = new AutenticacionService();
   private clienteService = new ClienteService();
   private vehiculoService = new VehiculoService();
@@ -66,136 +61,77 @@ export class ProcesarVentaService {
   private subastaService = new SubastaService();
   private ventaService = new VentaService();
   private notificacionService = new NotificacionService();
-  private crmService = new IntegracionCRMService();
 
   /**
-   * Ejecuta el flujo completo de venta orquestando todos los servicios.
-   *
-   * Patrón Saga con Compensación:
-   * - Pasos 1-5: solo lectura (validaciones). No requieren compensación.
-   * - Pasos 6-9: mutan estado. Si alguno falla, se ejecutan las
-   *   transacciones compensatorias en orden inverso para deshacer
-   *   los cambios ya realizados y mantener la consistencia del sistema.
+   * Ejecuta el flujo completo de venta — Patrón Chain (secuencial).
+   * Cada paso depende del resultado del anterior.
    */
-  async procesar(dto: ProcesarVentaDto, token: string): Promise<{ exito: true; resultado: ProcesarVentaResultado } | { exito: false; error: string; errorCode: string; compensaciones?: string[] }> {
+  async procesar(dto: ProcesarVentaDto, token: string): Promise<{ exito: true; resultado: ProcesarVentaResultado } | { exito: false; error: string; errorCode: string }> {
     const pasos: string[] = [];
 
-    // ============================
-    // FASE 1: VALIDACIONES (solo lectura — no requieren compensación)
-    // ============================
-
-    // --- Paso 1: Validar token de autenticación ---
+    // --- Paso 1: SVC-08 ServicioAutenticacion → validarToken ---
     const auth = this.autenticacionService.validarToken(token);
     if (!auth.valido) {
       return { exito: false, error: 'Token de autenticación inválido o expirado', errorCode: 'TOKEN_INVALIDO' };
     }
     pasos.push(`1. Token validado para usuario: ${auth.usuario}`);
 
-    // --- Paso 2: Obtener datos del cliente ---
+    // --- Paso 2: SVC-02 ServicioCliente → consultarCliente ---
     const cliente = this.clienteService.findById(dto.clienteId);
     if (!cliente) {
       return { exito: false, error: `Cliente con ID ${dto.clienteId} no encontrado`, errorCode: 'CLIENTE_NOT_FOUND' };
     }
     pasos.push(`2. Cliente obtenido: ${cliente.nombre} ${cliente.apellido}`);
 
-    // --- Paso 3: Obtener datos del vehículo ---
+    // --- Paso 3: SVC-01 ServicioVehiculo → consultarVehiculo ---
     const vehiculo = this.vehiculoService.findById(dto.vehiculoId);
     if (!vehiculo) {
       return { exito: false, error: `Vehículo con ID ${dto.vehiculoId} no encontrado`, errorCode: 'VEHICULO_NOT_FOUND' };
     }
     if (vehiculo.estado === 'vendido') {
-      return { exito: false, error: 'El vehículo ya fue vendido', errorCode: 'VEHICULO_VENDIDO' };
+      return { exito: false, error: 'El vehículo ya no puede ser adquirido (vendido)', errorCode: 'VEHICULO_NO_DISPONIBLE' };
     }
-    pasos.push(`3. Vehículo obtenido: ${vehiculo.marca} ${vehiculo.modelo}`);
+    if (vehiculo.estado !== 'disponible') {
+      return { exito: false, error: `El vehículo no está disponible (estado: ${vehiculo.estado})`, errorCode: 'VEHICULO_NO_DISPONIBLE' };
+    }
+    pasos.push(`3. Vehículo disponible: ${vehiculo.marca} ${vehiculo.modelo}`);
 
-    // --- Paso 4: Verificar inspección aprobada ---
+    // --- Paso 4: SVC-03 ServicioInspeccion → obtenerEstadoTecnico ---
     const inspeccion = this.inspeccionService.verificarInspeccion(dto.vehiculoId);
-    if (!inspeccion.aprobado) {
-      return { exito: false, error: 'El vehículo no tiene inspección aprobada', errorCode: 'INSPECCION_NO_APROBADA' };
+    if (!inspeccion.inspeccion) {
+      return { exito: false, error: 'El vehículo no tiene inspección registrada', errorCode: 'INSPECCION_PENDIENTE' };
     }
-    pasos.push(`4. Inspección verificada: aprobada (${inspeccion.inspeccion?.id})`);
+    if (!inspeccion.aprobado) {
+      return { exito: false, error: 'El vehículo no aprobó la inspección técnica', errorCode: 'INSPECCION_RECHAZADA' };
+    }
+    pasos.push(`4. Inspección aprobada: ${inspeccion.inspeccion.id}`);
 
-    // --- Paso 5: Verificar que no esté en subasta activa ---
+    // --- Paso 5: SVC-05 ServicioSubasta → validarDisponibilidad ---
     const subasta = this.subastaService.verificarDisponibilidad(dto.vehiculoId);
     if (!subasta.disponible) {
       return { exito: false, error: 'El vehículo tiene una subasta activa y no puede venderse directamente', errorCode: 'VEHICULO_EN_SUBASTA' };
     }
     pasos.push('5. Verificado: sin subasta activa');
 
-    // ============================
-    // FASE 2: MUTACIONES CON COMPENSACIÓN (Patrón Saga)
-    // Si un paso falla, se compensan los anteriores en orden inverso.
-    // ============================
+    // --- Paso 6: SVC-04 ServicioVenta → registrarVenta ---
+    const venta = this.ventaService.create({
+      clienteId: dto.clienteId,
+      vehiculoId: dto.vehiculoId,
+      precioFinal: dto.precioOfertado,
+    });
+    pasos.push(`6. Venta registrada: ${venta.id}`);
 
-    const compensaciones: string[] = [];
+    // Actualizar estado del vehículo a vendido
+    this.vehiculoService.update(dto.vehiculoId, { estado: 'vendido' });
 
-    // --- Paso 6: Registrar la venta ---
-    let venta;
-    try {
-      venta = this.ventaService.create({
-        clienteId: dto.clienteId,
-        vehiculoId: dto.vehiculoId,
-        precioFinal: dto.precioOfertado,
-      });
-      pasos.push(`6. Venta registrada: ${venta.id}`);
-    } catch (error) {
-      return { exito: false, error: 'Error al registrar la venta', errorCode: 'ERROR_REGISTRAR_VENTA', compensaciones };
-    }
-
-    // --- Paso 7: Actualizar estado del vehículo a "vendido" ---
-    try {
-      this.vehiculoService.update(dto.vehiculoId, { estado: 'vendido' });
-      pasos.push('7. Estado del vehículo actualizado a "vendido"');
-    } catch (error) {
-      // COMPENSACIÓN: Revertir paso 6
-      this.ventaService.update(venta.id, { estado: 'cancelada' });
-      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
-      return { exito: false, error: 'Error al actualizar estado del vehículo', errorCode: 'ERROR_ACTUALIZAR_VEHICULO', compensaciones };
-    }
-
-    // --- Paso 8: Enviar notificación de confirmación ---
-    let notificacion;
-    try {
-      notificacion = this.notificacionService.enviarNotificacion({
-        destinatario: cliente.email,
-        asunto: `Confirmación de compra - ${vehiculo.marca} ${vehiculo.modelo}`,
-        mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} (${vehiculo.placa}) ha sido procesada exitosamente. Precio final: $${dto.precioOfertado}`,
-        tipo: 'email',
-      });
-      pasos.push(`8. Notificación enviada: ${notificacion.id}`);
-    } catch (error) {
-      // COMPENSACIÓN: Revertir pasos 7 y 6 (orden inverso)
-      this.vehiculoService.update(dto.vehiculoId, { estado: 'disponible' });
-      compensaciones.push(`Compensación paso 7: Vehículo ${dto.vehiculoId} revertido a "disponible"`);
-      this.ventaService.update(venta.id, { estado: 'cancelada' });
-      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
-      return { exito: false, error: 'Error al enviar notificación de confirmación', errorCode: 'ERROR_NOTIFICACION', compensaciones };
-    }
-
-    // --- Paso 9: Sincronizar con CRM ---
-    let crm;
-    try {
-      crm = this.crmService.sincronizar({
-        entidad: 'venta',
-        accion: 'crear',
-        datos: { ventaId: venta.id, clienteId: cliente.id, vehiculoId: vehiculo.id, precio: dto.precioOfertado },
-      });
-      pasos.push(`9. CRM sincronizado: ${crm.crmReferencia}`);
-    } catch (error) {
-      // COMPENSACIÓN: Revertir pasos 8, 7 y 6 (orden inverso)
-      this.notificacionService.enviarNotificacion({
-        destinatario: cliente.email,
-        asunto: `CANCELACIÓN - ${vehiculo.marca} ${vehiculo.modelo}`,
-        mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} ha sido cancelada por un error en el proceso. Disculpe las molestias.`,
-        tipo: 'email',
-      });
-      compensaciones.push(`Compensación paso 8: Notificación de cancelación enviada a ${cliente.email}`);
-      this.vehiculoService.update(dto.vehiculoId, { estado: 'disponible' });
-      compensaciones.push(`Compensación paso 7: Vehículo ${dto.vehiculoId} revertido a "disponible"`);
-      this.ventaService.update(venta.id, { estado: 'cancelada' });
-      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
-      return { exito: false, error: 'Error al sincronizar con CRM', errorCode: 'ERROR_CRM', compensaciones };
-    }
+    // --- Paso 7: SVC-07 ServicioNotificacion → enviarNotificacion ---
+    const notificacion = this.notificacionService.enviarNotificacion({
+      destinatario: cliente.email,
+      asunto: `Confirmación de compra - ${vehiculo.marca} ${vehiculo.modelo}`,
+      mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} (${vehiculo.placa}) ha sido procesada exitosamente. Precio final: $${dto.precioOfertado}`,
+      tipo: 'email',
+    });
+    pasos.push(`7. Notificación enviada: ${notificacion.id}`);
 
     return {
       exito: true,
@@ -212,7 +148,6 @@ export class ProcesarVentaService {
         vehiculo: { id: vehiculo.id, marca: vehiculo.marca, modelo: vehiculo.modelo, estado: 'vendido' },
         inspeccion: { aprobado: true, id: inspeccion.inspeccion?.id },
         notificacion: { id: notificacion.id, estado: notificacion.estado },
-        crm: { id: crm.id, crmReferencia: crm.crmReferencia },
         pasos,
       },
     };

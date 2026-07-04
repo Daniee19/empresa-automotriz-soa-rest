@@ -42,6 +42,16 @@ export class InspeccionService {
     };
   }
 
+  /** Valida el estado técnico del vehículo — retorna APROBADO u OBSERVADO */
+  validarEstadoVehiculo(vehiculoId: string): { estado: 'APROBADO' | 'OBSERVADO' | 'SIN_INSPECCION'; inspeccion?: InspeccionResponseDto } {
+    const inspeccion = this.repository.findByVehiculoId(vehiculoId);
+    if (!inspeccion) return { estado: 'SIN_INSPECCION' };
+    return {
+      estado: inspeccion.resultado === 'aprobado' ? 'APROBADO' : 'OBSERVADO',
+      inspeccion: this.toResponseDto(inspeccion),
+    };
+  }
+
   create(dto: CreateInspeccionDto): InspeccionResponseDto {
     const inspeccion = this.repository.create(dto);
     return this.toResponseDto(inspeccion);
