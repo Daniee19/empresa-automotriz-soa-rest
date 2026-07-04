@@ -8,7 +8,8 @@
       "Bash(curl -s -X DELETE http://localhost:3000/api/v1/vehiculos/VH-004)",
       "Bash(curl -s -X DELETE http://localhost:3000/api/v1/vehiculos/VH-999)",
       "Bash(netstat -ano)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(ls:*)"
     ]
   }
 }
