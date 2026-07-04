@@ -14,6 +14,13 @@
  *   6. Registrar la venta
  *   7. Actualizar estado del vehículo a "vendido"
  *   8. Enviar notificación de confirmación
+ *   9. Sincronizar con CRM
+ *
+ * Patrón Saga con Compensación:
+ *   Los pasos 1-5 son de solo lectura (no mutan estado).
+ *   Los pasos 6-9 mutan estado — si alguno falla, se ejecutan
+ *   transacciones compensatorias en orden inverso para deshacer
+ *   los cambios ya realizados y mantener la consistencia.
  */
 
 import { AutenticacionService } from '@/modules/autenticacion/services/autenticacion.service';
@@ -63,10 +70,19 @@ export class ProcesarVentaService {
 
   /**
    * Ejecuta el flujo completo de venta orquestando todos los servicios.
-   * Si cualquier paso falla, se detiene y devuelve el error correspondiente.
+   *
+   * Patrón Saga con Compensación:
+   * - Pasos 1-5: solo lectura (validaciones). No requieren compensación.
+   * - Pasos 6-9: mutan estado. Si alguno falla, se ejecutan las
+   *   transacciones compensatorias en orden inverso para deshacer
+   *   los cambios ya realizados y mantener la consistencia del sistema.
    */
-  async procesar(dto: ProcesarVentaDto, token: string): Promise<{ exito: true; resultado: ProcesarVentaResultado } | { exito: false; error: string; errorCode: string }> {
+  async procesar(dto: ProcesarVentaDto, token: string): Promise<{ exito: true; resultado: ProcesarVentaResultado } | { exito: false; error: string; errorCode: string; compensaciones?: string[] }> {
     const pasos: string[] = [];
+
+    // ============================
+    // FASE 1: VALIDACIONES (solo lectura — no requieren compensación)
+    // ============================
 
     // --- Paso 1: Validar token de autenticación ---
     const auth = this.autenticacionService.validarToken(token);
@@ -106,34 +122,80 @@ export class ProcesarVentaService {
     }
     pasos.push('5. Verificado: sin subasta activa');
 
+    // ============================
+    // FASE 2: MUTACIONES CON COMPENSACIÓN (Patrón Saga)
+    // Si un paso falla, se compensan los anteriores en orden inverso.
+    // ============================
+
+    const compensaciones: string[] = [];
+
     // --- Paso 6: Registrar la venta ---
-    const venta = this.ventaService.create({
-      clienteId: dto.clienteId,
-      vehiculoId: dto.vehiculoId,
-      precioFinal: dto.precioOfertado,
-    });
-    pasos.push(`6. Venta registrada: ${venta.id}`);
+    let venta;
+    try {
+      venta = this.ventaService.create({
+        clienteId: dto.clienteId,
+        vehiculoId: dto.vehiculoId,
+        precioFinal: dto.precioOfertado,
+      });
+      pasos.push(`6. Venta registrada: ${venta.id}`);
+    } catch (error) {
+      return { exito: false, error: 'Error al registrar la venta', errorCode: 'ERROR_REGISTRAR_VENTA', compensaciones };
+    }
 
     // --- Paso 7: Actualizar estado del vehículo a "vendido" ---
-    this.vehiculoService.update(dto.vehiculoId, { estado: 'vendido' });
-    pasos.push('7. Estado del vehículo actualizado a "vendido"');
+    try {
+      this.vehiculoService.update(dto.vehiculoId, { estado: 'vendido' });
+      pasos.push('7. Estado del vehículo actualizado a "vendido"');
+    } catch (error) {
+      // COMPENSACIÓN: Revertir paso 6
+      this.ventaService.update(venta.id, { estado: 'cancelada' });
+      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
+      return { exito: false, error: 'Error al actualizar estado del vehículo', errorCode: 'ERROR_ACTUALIZAR_VEHICULO', compensaciones };
+    }
 
     // --- Paso 8: Enviar notificación de confirmación ---
-    const notificacion = this.notificacionService.enviarNotificacion({
-      destinatario: cliente.email,
-      asunto: `Confirmación de compra - ${vehiculo.marca} ${vehiculo.modelo}`,
-      mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} (${vehiculo.placa}) ha sido procesada exitosamente. Precio final: $${dto.precioOfertado}`,
-      tipo: 'email',
-    });
-    pasos.push(`8. Notificación enviada: ${notificacion.id}`);
+    let notificacion;
+    try {
+      notificacion = this.notificacionService.enviarNotificacion({
+        destinatario: cliente.email,
+        asunto: `Confirmación de compra - ${vehiculo.marca} ${vehiculo.modelo}`,
+        mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} (${vehiculo.placa}) ha sido procesada exitosamente. Precio final: $${dto.precioOfertado}`,
+        tipo: 'email',
+      });
+      pasos.push(`8. Notificación enviada: ${notificacion.id}`);
+    } catch (error) {
+      // COMPENSACIÓN: Revertir pasos 7 y 6 (orden inverso)
+      this.vehiculoService.update(dto.vehiculoId, { estado: 'disponible' });
+      compensaciones.push(`Compensación paso 7: Vehículo ${dto.vehiculoId} revertido a "disponible"`);
+      this.ventaService.update(venta.id, { estado: 'cancelada' });
+      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
+      return { exito: false, error: 'Error al enviar notificación de confirmación', errorCode: 'ERROR_NOTIFICACION', compensaciones };
+    }
 
-    // --- Bonus: Sincronizar con CRM ---
-    const crm = this.crmService.sincronizar({
-      entidad: 'venta',
-      accion: 'crear',
-      datos: { ventaId: venta.id, clienteId: cliente.id, vehiculoId: vehiculo.id, precio: dto.precioOfertado },
-    });
-    pasos.push(`9. CRM sincronizado: ${crm.crmReferencia}`);
+    // --- Paso 9: Sincronizar con CRM ---
+    let crm;
+    try {
+      crm = this.crmService.sincronizar({
+        entidad: 'venta',
+        accion: 'crear',
+        datos: { ventaId: venta.id, clienteId: cliente.id, vehiculoId: vehiculo.id, precio: dto.precioOfertado },
+      });
+      pasos.push(`9. CRM sincronizado: ${crm.crmReferencia}`);
+    } catch (error) {
+      // COMPENSACIÓN: Revertir pasos 8, 7 y 6 (orden inverso)
+      this.notificacionService.enviarNotificacion({
+        destinatario: cliente.email,
+        asunto: `CANCELACIÓN - ${vehiculo.marca} ${vehiculo.modelo}`,
+        mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} ha sido cancelada por un error en el proceso. Disculpe las molestias.`,
+        tipo: 'email',
+      });
+      compensaciones.push(`Compensación paso 8: Notificación de cancelación enviada a ${cliente.email}`);
+      this.vehiculoService.update(dto.vehiculoId, { estado: 'disponible' });
+      compensaciones.push(`Compensación paso 7: Vehículo ${dto.vehiculoId} revertido a "disponible"`);
+      this.ventaService.update(venta.id, { estado: 'cancelada' });
+      compensaciones.push(`Compensación paso 6: Venta ${venta.id} marcada como cancelada`);
+      return { exito: false, error: 'Error al sincronizar con CRM', errorCode: 'ERROR_CRM', compensaciones };
+    }
 
     return {
       exito: true,
