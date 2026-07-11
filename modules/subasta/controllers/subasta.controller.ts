@@ -50,4 +50,32 @@ export class SubastaController {
     }
     return jsonResponse(successResponse(null, 'Subasta eliminada correctamente'));
   }
+
+  /** GET /disponibilidad/[vehiculoId] — Verifica si el vehículo está disponible (sin subasta activa) */
+  async verificarDisponibilidad(vehiculoId: string): Promise<Response> {
+    const resultado = this.service.verificarDisponibilidad(vehiculoId);
+    return jsonResponse(successResponse(resultado, 'Disponibilidad verificada'));
+  }
+
+  /** POST /registrar-oferta — Registra una oferta en una subasta activa */
+  async registrarOferta(request: Request): Promise<Response> {
+    const dto = await parseBody<{ subastaId: string; montoOferta: number; clienteId: string }>(request);
+    if (!dto.subastaId || !dto.montoOferta || !dto.clienteId) {
+      return jsonResponse(
+        errorResponse('Faltan campos requeridos: subastaId, montoOferta, clienteId', 'CAMPOS_REQUERIDOS'),
+        400
+      );
+    }
+    const resultado = this.service.registrarOferta(dto.subastaId, dto.montoOferta, dto.clienteId);
+    if (!resultado.aceptada) {
+      return jsonResponse(errorResponse(resultado.motivo || 'Oferta inválida', 'OFERTA_INVALIDA'), 400);
+    }
+    return jsonResponse(successResponse(resultado, 'Oferta registrada correctamente'));
+  }
+
+  /** GET /historial/[vehiculoId] — Historial de subastas de un vehículo */
+  async historialOfertas(vehiculoId: string): Promise<Response> {
+    const resultado = this.service.consultarHistorialOfertas(vehiculoId);
+    return jsonResponse(successResponse(resultado, 'Historial de ofertas obtenido'));
+  }
 }

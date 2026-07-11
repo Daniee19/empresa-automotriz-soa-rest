@@ -50,4 +50,10 @@ export class VentaController {
     }
     return jsonResponse(successResponse(null, 'Venta eliminada correctamente'));
   }
+
+  /** GET /historial/[vehiculoId] — Historial de ventas de un vehículo */
+  async historialVentas(vehiculoId: string): Promise<Response> {
+    const resultado = this.service.consultarHistorialVentas(vehiculoId);
+    return jsonResponse(successResponse(resultado, 'Historial de ventas obtenido'));
+  }
 }

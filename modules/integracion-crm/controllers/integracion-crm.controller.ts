@@ -23,4 +23,10 @@ export class IntegracionCRMController {
     const resultado = this.service.sincronizar(dto);
     return jsonResponse(successResponse(resultado, 'Sincronización con CRM exitosa'));
   }
+
+  /** GET /api/v1/crm/interacciones/[clienteId] — Obtiene interacciones del CRM */
+  async obtenerInteracciones(clienteId: string): Promise<Response> {
+    const resultado = this.service.obtenerInteracciones(clienteId);
+    return jsonResponse(successResponse(resultado, 'Interacciones obtenidas'));
+  }
 }

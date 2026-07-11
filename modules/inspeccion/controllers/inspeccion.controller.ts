@@ -50,4 +50,16 @@ export class InspeccionController {
     }
     return jsonResponse(successResponse(null, 'Inspección eliminada correctamente'));
   }
+
+  /** GET /verificar/[vehiculoId] — Verifica si un vehículo tiene inspección aprobada */
+  async verificarInspeccion(vehiculoId: string): Promise<Response> {
+    const resultado = this.service.verificarInspeccion(vehiculoId);
+    return jsonResponse(successResponse(resultado, 'Verificación de inspección completada'));
+  }
+
+  /** GET /estado/[vehiculoId] — Valida el estado técnico del vehículo */
+  async validarEstadoVehiculo(vehiculoId: string): Promise<Response> {
+    const resultado = this.service.validarEstadoVehiculo(vehiculoId);
+    return jsonResponse(successResponse(resultado, 'Estado técnico validado'));
+  }
 }

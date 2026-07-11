@@ -15,19 +15,16 @@
  *   6. SVC-04 ServicioVenta          → registrarVenta
  *   7. SVC-07 ServicioNotificacion   → enviarNotificacion
  *
+ * Comunicación SOA: Todas las llamadas se realizan vía HTTP (axios)
+ * a los endpoints REST de cada servicio, pasando por sus controladores.
+ *
  * Comportamiento ante error:
  *   - Paso 3 devuelve VEHICULO_NO_DISPONIBLE → se detiene e informa al cliente.
  *   - Paso 4 devuelve INSPECCION_PENDIENTE o INSPECCION_RECHAZADA → no se
  *     ejecutan pasos posteriores hasta regularizar la inspección técnica.
  */
 
-import { AutenticacionService } from '@/modules/autenticacion/services/autenticacion.service';
-import { ClienteService } from '@/modules/cliente/services/cliente.service';
-import { VehiculoService } from '@/modules/vehiculo/services/vehiculo.service';
-import { InspeccionService } from '@/modules/inspeccion/services/inspeccion.service';
-import { SubastaService } from '@/modules/subasta/services/subasta.service';
-import { VentaService } from './venta.service';
-import { NotificacionService } from '@/modules/notificacion/services/notificacion.service';
+import apiClient from '@/modules/shared/api-client';
 
 /** Datos de entrada para procesar una venta */
 export interface ProcesarVentaDto {
@@ -50,42 +47,46 @@ export interface ProcesarVentaResultado {
   vehiculo: { id: string; marca: string; modelo: string; estado: string };
   inspeccion: { aprobado: boolean; id?: string };
   notificacion: { id: string; estado: string };
-  pasos: string[]; // Registro de cada paso ejecutado exitosamente
+  pasos: string[];
 }
 
 export class ProcesarVentaService {
-  private autenticacionService = new AutenticacionService();
-  private clienteService = new ClienteService();
-  private vehiculoService = new VehiculoService();
-  private inspeccionService = new InspeccionService();
-  private subastaService = new SubastaService();
-  private ventaService = new VentaService();
-  private notificacionService = new NotificacionService();
-
   /**
    * Ejecuta el flujo completo de venta — Patrón Chain (secuencial).
-   * Cada paso depende del resultado del anterior.
+   * Cada paso llama al endpoint REST del servicio correspondiente vía axios.
    */
   async procesar(dto: ProcesarVentaDto, token: string): Promise<{ exito: true; resultado: ProcesarVentaResultado } | { exito: false; error: string; errorCode: string }> {
     const pasos: string[] = [];
+    const authHeader = { Authorization: `Bearer ${token}` };
 
-    // --- Paso 1: SVC-08 ServicioAutenticacion → validarToken ---
-    const auth = this.autenticacionService.validarToken(token);
-    if (!auth.valido) {
+    // --- Paso 1: SVC-08 POST /api/v1/validar-token → validarToken ---
+    try {
+      const authRes = await apiClient.post('/validar-token', {}, { headers: authHeader });
+      const auth = authRes.data.data;
+      if (!auth.valido) {
+        return { exito: false, error: 'Token de autenticación inválido o expirado', errorCode: 'TOKEN_INVALIDO' };
+      }
+      pasos.push(`1. Token validado para usuario: ${auth.usuario}`);
+    } catch {
       return { exito: false, error: 'Token de autenticación inválido o expirado', errorCode: 'TOKEN_INVALIDO' };
     }
-    pasos.push(`1. Token validado para usuario: ${auth.usuario}`);
 
-    // --- Paso 2: SVC-02 ServicioCliente → consultarCliente ---
-    const cliente = this.clienteService.findById(dto.clienteId);
-    if (!cliente) {
+    // --- Paso 2: SVC-02 GET /api/v1/clientes/{id} → consultarCliente ---
+    let cliente: { id: string; nombre: string; apellido: string; email: string };
+    try {
+      const clienteRes = await apiClient.get(`/clientes/${dto.clienteId}`);
+      cliente = clienteRes.data.data;
+      pasos.push(`2. Cliente obtenido: ${cliente.nombre} ${cliente.apellido}`);
+    } catch {
       return { exito: false, error: `Cliente con ID ${dto.clienteId} no encontrado`, errorCode: 'CLIENTE_NOT_FOUND' };
     }
-    pasos.push(`2. Cliente obtenido: ${cliente.nombre} ${cliente.apellido}`);
 
-    // --- Paso 3: SVC-01 ServicioVehiculo → consultarVehiculo ---
-    const vehiculo = this.vehiculoService.findById(dto.vehiculoId);
-    if (!vehiculo) {
+    // --- Paso 3: SVC-01 GET /api/v1/vehiculos/{id} → consultarVehiculo ---
+    let vehiculo: { id: string; marca: string; modelo: string; estado: string; placa: string };
+    try {
+      const vehiculoRes = await apiClient.get(`/vehiculos/${dto.vehiculoId}`);
+      vehiculo = vehiculoRes.data.data;
+    } catch {
       return { exito: false, error: `Vehículo con ID ${dto.vehiculoId} no encontrado`, errorCode: 'VEHICULO_NOT_FOUND' };
     }
     if (vehiculo.estado === 'vendido') {
@@ -96,8 +97,9 @@ export class ProcesarVentaService {
     }
     pasos.push(`3. Vehículo disponible: ${vehiculo.marca} ${vehiculo.modelo}`);
 
-    // --- Paso 4: SVC-03 ServicioInspeccion → obtenerEstadoTecnico ---
-    const inspeccion = this.inspeccionService.verificarInspeccion(dto.vehiculoId);
+    // --- Paso 4: SVC-03 GET /api/v1/inspecciones/verificar/{vehiculoId} → obtenerEstadoTecnico ---
+    const inspeccionRes = await apiClient.get(`/inspecciones/verificar/${dto.vehiculoId}`);
+    const inspeccion = inspeccionRes.data.data;
     if (!inspeccion.inspeccion) {
       return { exito: false, error: 'El vehículo no tiene inspección registrada', errorCode: 'INSPECCION_PENDIENTE' };
     }
@@ -106,31 +108,34 @@ export class ProcesarVentaService {
     }
     pasos.push(`4. Inspección aprobada: ${inspeccion.inspeccion.id}`);
 
-    // --- Paso 5: SVC-05 ServicioSubasta → validarDisponibilidad ---
-    const subasta = this.subastaService.verificarDisponibilidad(dto.vehiculoId);
+    // --- Paso 5: SVC-05 GET /api/v1/subastas/disponibilidad/{vehiculoId} → validarDisponibilidad ---
+    const subastaRes = await apiClient.get(`/subastas/disponibilidad/${dto.vehiculoId}`);
+    const subasta = subastaRes.data.data;
     if (!subasta.disponible) {
       return { exito: false, error: 'El vehículo tiene una subasta activa y no puede venderse directamente', errorCode: 'VEHICULO_EN_SUBASTA' };
     }
     pasos.push('5. Verificado: sin subasta activa');
 
-    // --- Paso 6: SVC-04 ServicioVenta → registrarVenta ---
-    const venta = this.ventaService.create({
+    // --- Paso 6: SVC-04 POST /api/v1/ventas → registrarVenta ---
+    const ventaRes = await apiClient.post('/ventas', {
       clienteId: dto.clienteId,
       vehiculoId: dto.vehiculoId,
       precioFinal: dto.precioOfertado,
     });
+    const venta = ventaRes.data.data;
     pasos.push(`6. Venta registrada: ${venta.id}`);
 
     // Actualizar estado del vehículo a vendido
-    this.vehiculoService.update(dto.vehiculoId, { estado: 'vendido' });
+    await apiClient.put(`/vehiculos/${dto.vehiculoId}`, { estado: 'vendido' });
 
-    // --- Paso 7: SVC-07 ServicioNotificacion → enviarNotificacion ---
-    const notificacion = this.notificacionService.enviarNotificacion({
+    // --- Paso 7: SVC-07 POST /api/v1/enviar-notificacion → enviarNotificacion ---
+    const notifRes = await apiClient.post('/enviar-notificacion', {
       destinatario: cliente.email,
       asunto: `Confirmación de compra - ${vehiculo.marca} ${vehiculo.modelo}`,
       mensaje: `Estimado/a ${cliente.nombre}, su compra del vehículo ${vehiculo.marca} ${vehiculo.modelo} (${vehiculo.placa}) ha sido procesada exitosamente. Precio final: $${dto.precioOfertado}`,
       tipo: 'email',
     });
+    const notificacion = notifRes.data.data;
     pasos.push(`7. Notificación enviada: ${notificacion.id}`);
 
     return {

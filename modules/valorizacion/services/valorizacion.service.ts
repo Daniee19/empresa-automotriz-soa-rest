@@ -13,6 +13,9 @@
  *   4. SVC-05 ServicioSubasta          → consultarHistorialOfertas(idVehiculo) [500ms max]
  *   5. SVC-09 ServicioIntegracionCRM   → obtenerInteracciones(idCliente)       [600ms max]
  *
+ * Comunicación SOA: Todas las llamadas se realizan vía HTTP (axios)
+ * a los endpoints REST de cada servicio, pasando por sus controladores.
+ *
  * Resultado consolidado:
  *   ValorizacionVehiculo { datosVehiculo, precioReferencial, historialVentas,
  *                          historialOfertas, interesCliente }
@@ -24,16 +27,12 @@
  *   "datos no disponibles", evitando bloquear el proceso completo.
  */
 
-import { VehiculoService } from '@/modules/vehiculo/services/vehiculo.service';
-import { PrecioService } from '@/modules/precio/services/precio.service';
-import { VentaService } from '@/modules/venta/services/venta.service';
-import { SubastaService } from '@/modules/subasta/services/subasta.service';
-import { IntegracionCRMService } from '@/modules/integracion-crm/services/integracion-crm.service';
+import apiClient from '@/modules/shared/api-client';
 
 /** Datos de entrada para valorizar un vehículo */
 export interface ValorizacionDto {
   vehiculoId: string;
-  clienteId?: string; // Opcional — si se provee, consulta interés en CRM
+  clienteId?: string;
 }
 
 /** Resultado consolidado de la valorización */
@@ -60,46 +59,48 @@ function conTimeout<T>(promesa: Promise<T>, ms: number): Promise<T | null> {
 }
 
 export class ValorizacionService {
-  private vehiculoService = new VehiculoService();
-  private precioService = new PrecioService();
-  private ventaService = new VentaService();
-  private subastaService = new SubastaService();
-  private crmService = new IntegracionCRMService();
-
   /**
    * Ejecuta la valorización — Patrón Scatter-Gather.
-   * Lanza todas las consultas en paralelo y consolida resultados.
+   * Lanza todas las consultas HTTP en paralelo y consolida resultados.
    */
   async valorizar(dto: ValorizacionDto): Promise<ValorizacionResultado> {
     const inicio = Date.now();
 
-    // Scatter: lanzar todas las consultas en paralelo con timeout
-    const [vehiculo, precio, ventas, ofertas, crm] = await Promise.all([
-      // 1. SVC-01 ServicioVehiculo → consultarVehiculo
-      conTimeout(Promise.resolve(this.vehiculoService.findById(dto.vehiculoId)), TIMEOUT_MS),
-      // 2. SVC-06 ServicioPrecio → calcularPrecioMercado
+    // Scatter: lanzar todas las consultas HTTP en paralelo con timeout
+    const [vehiculoRes, precioRes, ventasRes, ofertasRes, crmRes] = await Promise.all([
+      // 1. SVC-01 GET /api/v1/vehiculos/{id} → consultarVehiculo
       conTimeout(
-        Promise.resolve(
-          (() => {
-            const v = this.vehiculoService.findById(dto.vehiculoId);
-            if (!v) return null;
-            return this.precioService.calcularPrecio({
-              vehiculoId: v.id,
-              precioBase: v.precio,
-              anio: v.anio,
-              marca: v.marca,
-            });
-          })()
-        ),
+        apiClient.get(`/vehiculos/${dto.vehiculoId}`).then(r => r.data.data).catch(() => null),
         TIMEOUT_MS
       ),
-      // 3. SVC-04 ServicioVenta → consultarHistorialVentas
-      conTimeout(Promise.resolve(this.ventaService.consultarHistorialVentas(dto.vehiculoId)), TIMEOUT_MS),
-      // 4. SVC-05 ServicioSubasta → consultarHistorialOfertas
-      conTimeout(Promise.resolve(this.subastaService.consultarHistorialOfertas(dto.vehiculoId)), TIMEOUT_MS),
-      // 5. SVC-09 ServicioIntegracionCRM → obtenerInteracciones
+      // 2. SVC-06 POST /api/v1/calcular-precio → calcularPrecioMercado
       conTimeout(
-        Promise.resolve(dto.clienteId ? this.crmService.obtenerInteracciones(dto.clienteId) : null),
+        apiClient.get(`/vehiculos/${dto.vehiculoId}`)
+          .then(r => r.data.data)
+          .then(v => v ? apiClient.post('/calcular-precio', {
+            vehiculoId: v.id,
+            precioBase: v.precio,
+            anio: v.anio,
+            marca: v.marca,
+          }).then(r => r.data.data) : null)
+          .catch(() => null),
+        TIMEOUT_MS
+      ),
+      // 3. SVC-04 GET /api/v1/ventas/historial/{vehiculoId} → consultarHistorialVentas
+      conTimeout(
+        apiClient.get(`/ventas/historial/${dto.vehiculoId}`).then(r => r.data.data).catch(() => null),
+        TIMEOUT_MS
+      ),
+      // 4. SVC-05 GET /api/v1/subastas/historial/{vehiculoId} → consultarHistorialOfertas
+      conTimeout(
+        apiClient.get(`/subastas/historial/${dto.vehiculoId}`).then(r => r.data.data).catch(() => null),
+        TIMEOUT_MS
+      ),
+      // 5. SVC-09 GET /api/v1/crm/interacciones/{clienteId} → obtenerInteracciones
+      conTimeout(
+        dto.clienteId
+          ? apiClient.get(`/crm/interacciones/${dto.clienteId}`).then(r => r.data.data).catch(() => null)
+          : Promise.resolve(null),
         TIMEOUT_MS
       ),
     ]);
@@ -110,11 +111,11 @@ export class ValorizacionService {
     let serviciosDisponibles = 0;
     const serviciosTotales = 5;
 
-    const datosVehiculo = vehiculo ? (serviciosDisponibles++, vehiculo as unknown as Record<string, unknown>) : 'datos no disponibles' as const;
-    const precioReferencial = precio ? (serviciosDisponibles++, precio as unknown as Record<string, unknown>) : 'datos no disponibles' as const;
-    const historialVentas = ventas ? (serviciosDisponibles++, ventas as unknown as Record<string, unknown>[]) : 'datos no disponibles' as const;
-    const historialOfertas = ofertas ? (serviciosDisponibles++, ofertas as unknown as Record<string, unknown>[]) : 'datos no disponibles' as const;
-    const interesCliente = crm ? (serviciosDisponibles++, crm as unknown as Record<string, unknown>) : 'datos no disponibles' as const;
+    const datosVehiculo = vehiculoRes ? (serviciosDisponibles++, vehiculoRes as Record<string, unknown>) : 'datos no disponibles' as const;
+    const precioReferencial = precioRes ? (serviciosDisponibles++, precioRes as Record<string, unknown>) : 'datos no disponibles' as const;
+    const historialVentas = ventasRes ? (serviciosDisponibles++, ventasRes as Record<string, unknown>[]) : 'datos no disponibles' as const;
+    const historialOfertas = ofertasRes ? (serviciosDisponibles++, ofertasRes as Record<string, unknown>[]) : 'datos no disponibles' as const;
+    const interesCliente = crmRes ? (serviciosDisponibles++, crmRes as Record<string, unknown>) : 'datos no disponibles' as const;
 
     return {
       vehiculoId: dto.vehiculoId,

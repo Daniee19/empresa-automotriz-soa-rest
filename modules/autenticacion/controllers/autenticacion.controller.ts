@@ -31,11 +31,22 @@ export class AutenticacionController {
     return jsonResponse(successResponse(resultado, 'Autenticación exitosa'));
   }
 
-  /**
-   * Valida un token desde el header Authorization.
-   * Usado internamente por la orquestación de procesar-venta.
-   */
-  validarToken(token: string): { valido: boolean; usuario?: string } {
-    return this.service.validarToken(token);
+  /** POST /api/v1/validar-token — Valida un token y retorna si es válido */
+  async validarToken(request: Request): Promise<Response> {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return jsonResponse(
+        errorResponse('Se requiere header Authorization con formato Bearer <token>', 'AUTH_REQUERIDA'),
+        401
+      );
+    }
+    const token = authHeader.replace('Bearer ', '');
+    const resultado = this.service.validarToken(token);
+
+    if (!resultado.valido) {
+      return jsonResponse(errorResponse('Token inválido o expirado', 'TOKEN_INVALIDO'), 401);
+    }
+
+    return jsonResponse(successResponse(resultado, 'Token válido'));
   }
 }
